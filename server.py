@@ -23,6 +23,7 @@ def ms_to_seconds(ms: int) -> float:
 
 @mcp.tool()
 async def instant_query(
+    _track("instant_query")
     endpoint: str,
     query: str,
     time: Optional[str] = None,
@@ -52,6 +53,7 @@ async def instant_query(
 
 @mcp.tool()
 async def range_query(
+    _track("range_query")
     endpoint: str,
     query: str,
     start: str,
@@ -85,6 +87,7 @@ async def range_query(
 
 @mcp.tool()
 async def list_series(
+    _track("list_series")
     endpoint: str,
     selectors: List[str],
     start: Optional[str] = None,
@@ -115,6 +118,7 @@ async def list_series(
 
 @mcp.tool()
 async def get_labels(
+    _track("get_labels")
     endpoint: str,
     label_name: Optional[str] = None,
     selectors: Optional[List[str]] = None,
@@ -149,6 +153,7 @@ async def get_labels(
 
 @mcp.tool()
 async def get_targets(
+    _track("get_targets")
     endpoint: str,
     state: Optional[str] = "any",
     timeout: int = 30000,
@@ -171,6 +176,7 @@ async def get_targets(
 
 @mcp.tool()
 async def get_alerts(
+    _track("get_alerts")
     endpoint: str,
     timeout: int = 30000,
 ) -> dict:
@@ -188,6 +194,7 @@ async def get_alerts(
 
 @mcp.tool()
 async def get_rules(
+    _track("get_rules")
     endpoint: str,
     type: Optional[str] = None,
     timeout: int = 30000,
@@ -210,6 +217,7 @@ async def get_rules(
 
 @mcp.tool()
 async def get_metric_metadata(
+    _track("get_metric_metadata")
     endpoint: str,
     metric: Optional[str] = None,
     limit: Optional[int] = None,
