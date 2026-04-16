@@ -7,62 +7,42 @@ from fastmcp import FastMCP
 import httpx
 import os
 from typing import Optional, List
-from datetime import datetime
 
 mcp = FastMCP("prometheus-query")
 
-PROMETHEUS_ENDPOINT = os.environ.get("PROMETHEUS_ENDPOINT", "http://localhost:9090")
-PROMETHEUS_BASE_URL = os.environ.get("PROMETHEUS_BASE_URL", "/api/v1")
-PROMETHEUS_USERNAME = os.environ.get("PROMETHEUS_USERNAME", "")
-PROMETHEUS_PASSWORD = os.environ.get("PROMETHEUS_PASSWORD", "")
-PROMETHEUS_TOKEN = os.environ.get("PROMETHEUS_TOKEN", "")
 
-
-def get_base_url() -> str:
-    return PROMETHEUS_ENDPOINT.rstrip("/") + "/" + PROMETHEUS_BASE_URL.strip("/")
-
-
-def get_auth():
-    if PROMETHEUS_USERNAME and PROMETHEUS_PASSWORD:
-        return (PROMETHEUS_USERNAME, PROMETHEUS_PASSWORD)
+def build_auth(username: Optional[str], password: Optional[str]):
+    if username and password:
+        return (username, password)
     return None
 
 
-def get_headers() -> dict:
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    if PROMETHEUS_TOKEN:
-        headers["Authorization"] = f"Bearer {PROMETHEUS_TOKEN}"
-    return headers
+def ms_to_seconds(ms: int) -> float:
+    return ms / 1000.0
 
 
 @mcp.tool()
 async def instant_query(
+    endpoint: str,
     query: str,
     time: Optional[str] = None,
-    timeout: Optional[str] = None
+    timeout: int = 30000,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
 ) -> dict:
-    """Evaluates an instant Prometheus query at a single point in time.
-    
-    Args:
-        query: Prometheus expression query string (PromQL).
-        time: Evaluation timestamp as RFC3339 or Unix timestamp (seconds). Optional, defaults to current time.
-        timeout: Evaluation timeout string (e.g. '30s'). Optional.
-    
-    Returns:
-        Query result with resultType and result array.
-    """
+    """Execute an instant PromQL query against a Prometheus instance at a specific point in time.
+    Use this when you need the current value of a metric or want to evaluate a PromQL expression
+    at a single timestamp. Returns vector or scalar results."""
+    url = f"{endpoint.rstrip('/')}/api/v1/query"
     params = {"query": query}
     if time:
         params["time"] = time
-    if timeout:
-        params["timeout"] = timeout
 
-    url = f"{get_base_url()}/query"
-    auth = get_auth()
-    headers = get_headers()
+    auth = build_auth(username, password)
+    timeout_seconds = ms_to_seconds(timeout)
 
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 30.0}
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        kwargs = {"params": params}
         if auth:
             kwargs["auth"] = auth
         response = await client.get(url, **kwargs)
@@ -72,384 +52,183 @@ async def instant_query(
 
 @mcp.tool()
 async def range_query(
+    endpoint: str,
     query: str,
     start: str,
     end: str,
     step: str,
-    timeout: Optional[str] = None
+    timeout: int = 30000,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
 ) -> dict:
-    """Evaluates a Prometheus expression query over a range of time.
-    
-    Args:
-        query: Prometheus expression query string (PromQL).
-        start: Start timestamp as RFC3339 or Unix timestamp (seconds).
-        end: End timestamp as RFC3339 or Unix timestamp (seconds).
-        step: Query resolution step width in duration format or float number of seconds (e.g. '15s', '1m', '60').
-        timeout: Evaluation timeout string (e.g. '30s'). Optional.
-    
-    Returns:
-        Range query result with resultType 'matrix' and result array of time series.
-    """
+    """Execute a PromQL range query to retrieve metric values over a time range with a given step interval.
+    Use this when you need time-series data for charting, trend analysis, or historical investigation of metrics."""
+    url = f"{endpoint.rstrip('/')}/api/v1/query_range"
     params = {
         "query": query,
         "start": start,
         "end": end,
-        "step": step
+        "step": step,
     }
-    if timeout:
-        params["timeout"] = timeout
 
-    url = f"{get_base_url()}/query_range"
-    auth = get_auth()
-    headers = get_headers()
+    auth = build_auth(username, password)
+    timeout_seconds = ms_to_seconds(timeout)
 
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 60.0}
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        kwargs = {"params": params}
         if auth:
             kwargs["auth"] = auth
         response = await client.get(url, **kwargs)
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool()
+async def list_series(
+    endpoint: str,
+    selectors: List[str],
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    timeout: int = 30000,
+) -> dict:
+    """Find all time series matching a given set of label selectors within a time range.
+    Use this to discover which metrics and label combinations exist in Prometheus,
+    or to explore what data is available before querying."""
+    url = f"{endpoint.rstrip('/')}/api/v1/series"
+
+    # Build params manually to support repeated 'match[]' keys
+    params = []
+    for selector in selectors:
+        params.append(("match[]", selector))
+    if start:
+        params.append(("start", start))
+    if end:
+        params.append(("end", end))
+
+    timeout_seconds = ms_to_seconds(timeout)
+
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.get(url, params=params)
         response.raise_for_status()
         return response.json()
 
 
 @mcp.tool()
 async def get_labels(
+    endpoint: str,
+    label_name: Optional[str] = None,
+    selectors: Optional[List[str]] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
-    match: Optional[List[str]] = None
+    timeout: int = 30000,
 ) -> dict:
-    """Returns a list of label names.
-    
-    Args:
-        start: Start timestamp as RFC3339 or Unix timestamp. Optional.
-        end: End timestamp as RFC3339 or Unix timestamp. Optional.
-        match: Repeated series selector argument that selects the series from which to read the label names. Optional.
-    
-    Returns:
-        List of label name strings.
-    """
-    params = {}
+    """Retrieve all label names or the values for a specific label name from Prometheus.
+    Use this to explore available labels for building queries, understanding metric dimensions,
+    or autocompleting label filters."""
+    if label_name:
+        url = f"{endpoint.rstrip('/')}/api/v1/label/{label_name}/values"
+    else:
+        url = f"{endpoint.rstrip('/')}/api/v1/labels"
+
+    params = []
+    if selectors:
+        for selector in selectors:
+            params.append(("match[]", selector))
     if start:
-        params["start"] = start
+        params.append(("start", start))
     if end:
-        params["end"] = end
-    if match:
-        params["match[]"] = match
+        params.append(("end", end))
 
-    url = f"{get_base_url()}/labels"
-    auth = get_auth()
-    headers = get_headers()
+    timeout_seconds = ms_to_seconds(timeout)
 
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_label_values(
-    label_name: str,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    match: Optional[List[str]] = None
-) -> dict:
-    """Returns a list of label values for a provided label name.
-    
-    Args:
-        label_name: The label name to query values for.
-        start: Start timestamp as RFC3339 or Unix timestamp. Optional.
-        end: End timestamp as RFC3339 or Unix timestamp. Optional.
-        match: Repeated series selector argument. Optional.
-    
-    Returns:
-        List of label value strings.
-    """
-    params = {}
-    if start:
-        params["start"] = start
-    if end:
-        params["end"] = end
-    if match:
-        params["match[]"] = match
-
-    url = f"{get_base_url()}/label/{label_name}/values"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def find_series(
-    match: List[str],
-    start: Optional[str] = None,
-    end: Optional[str] = None
-) -> dict:
-    """Returns the list of time series that match a certain label set.
-    
-    Args:
-        match: List of series selector strings (e.g. ['up', 'process_start_time_seconds{job="prometheus"}']).
-        start: Start timestamp as RFC3339 or Unix timestamp. Optional.
-        end: End timestamp as RFC3339 or Unix timestamp. Optional.
-    
-    Returns:
-        List of metric objects (label sets) matching the selectors.
-    """
-    params = {"match[]": match}
-    if start:
-        params["start"] = start
-    if end:
-        params["end"] = end
-
-    url = f"{get_base_url()}/series"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.get(url, params=params if params else None)
         response.raise_for_status()
         return response.json()
 
 
 @mcp.tool()
 async def get_targets(
-    state: Optional[str] = None
+    endpoint: str,
+    state: Optional[str] = "any",
+    timeout: int = 30000,
 ) -> dict:
-    """Returns an overview of the current state of the Prometheus target discovery.
-    
-    Args:
-        state: Filter targets by state. Can be 'active', 'dropped', or 'any'. Optional, defaults to 'any'.
-    
-    Returns:
-        Object with 'activeTargets' and 'droppedTargets' arrays.
-    """
+    """Retrieve the current status of all scrape targets known to Prometheus.
+    Use this to check which targets are up or down, inspect their labels,
+    and diagnose scraping issues."""
+    url = f"{endpoint.rstrip('/')}/api/v1/targets"
     params = {}
-    if state:
+    if state and state != "any":
         params["state"] = state
 
-    url = f"{get_base_url()}/targets"
-    auth = get_auth()
-    headers = get_headers()
+    timeout_seconds = ms_to_seconds(timeout)
 
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.get(url, params=params if params else None)
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool()
+async def get_alerts(
+    endpoint: str,
+    timeout: int = 30000,
+) -> dict:
+    """Retrieve all active alerts currently firing in Prometheus.
+    Use this to check for ongoing incidents, see alert states and labels,
+    and understand what alert rules are currently triggered."""
+    url = f"{endpoint.rstrip('/')}/api/v1/alerts"
+    timeout_seconds = ms_to_seconds(timeout)
+
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.get(url)
         response.raise_for_status()
         return response.json()
 
 
 @mcp.tool()
 async def get_rules(
-    type: Optional[str] = None
+    endpoint: str,
+    type: Optional[str] = None,
+    timeout: int = 30000,
 ) -> dict:
-    """Returns a list of alerting and recording rules currently loaded.
-    
-    Args:
-        type: Filter rules by type. Can be 'alert' or 'record'. Optional, returns all types by default.
-    
-    Returns:
-        Object with 'groups' array of rule groups, each containing rules.
-    """
+    """Retrieve all alerting and recording rules loaded in Prometheus.
+    Use this to inspect rule definitions, see rule evaluation status,
+    and audit what alerting logic is configured."""
+    url = f"{endpoint.rstrip('/')}/api/v1/rules"
     params = {}
     if type:
         params["type"] = type
 
-    url = f"{get_base_url()}/rules"
-    auth = get_auth()
-    headers = get_headers()
+    timeout_seconds = ms_to_seconds(timeout)
 
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.get(url, params=params if params else None)
         response.raise_for_status()
         return response.json()
 
 
 @mcp.tool()
-async def get_alerts() -> dict:
-    """Returns a list of all active alerts.
-    
-    Returns:
-        Object with 'alerts' array of currently active alert instances.
-    """
-    url = f"{get_base_url()}/alerts"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_alert_managers() -> dict:
-    """Returns an overview of the current state of the Prometheus alertmanager discovery.
-    
-    Returns:
-        Object with 'activeAlertmanagers' and 'droppedAlertmanagers' arrays.
-    """
-    url = f"{get_base_url()}/alertmanagers"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_metadata(
+async def get_metric_metadata(
+    endpoint: str,
     metric: Optional[str] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    timeout: int = 30000,
 ) -> dict:
-    """Returns metadata about metrics currently scraped from targets.
-    
-    Args:
-        metric: A metric name to filter metadata for. Optional, returns all metrics metadata if not specified.
-        limit: Maximum number of metrics to return. Optional.
-    
-    Returns:
-        Object mapping metric names to their metadata (type, help, unit).
-    """
+    """Retrieve metadata (type, help text, unit) for metrics stored in Prometheus.
+    Use this to understand what a metric measures, its type (counter, gauge, histogram, summary),
+    and its documentation string before querying it."""
+    url = f"{endpoint.rstrip('/')}/api/v1/metadata"
     params = {}
     if metric:
         params["metric"] = metric
     if limit is not None:
         params["limit"] = str(limit)
 
-    url = f"{get_base_url()}/metadata"
-    auth = get_auth()
-    headers = get_headers()
+    timeout_seconds = ms_to_seconds(timeout)
 
-    async with httpx.AsyncClient() as client:
-        kwargs = {"params": params, "headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_tsdb_stats() -> dict:
-    """Returns various cardinality statistics about the Prometheus TSDB.
-    
-    Returns:
-        TSDB statistics including headStats, seriesCountByMetricName, labelValueCountByLabelName, etc.
-    """
-    url = f"{get_base_url()}/status/tsdb"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_build_info() -> dict:
-    """Returns various build information properties about the Prometheus server.
-    
-    Returns:
-        Build information including version, revision, branch, buildUser, buildDate, goVersion.
-    """
-    url = f"{get_base_url()}/status/buildinfo"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_runtime_info() -> dict:
-    """Returns various runtime information properties about the Prometheus server.
-    
-    Returns:
-        Runtime information including startTime, CWD, reloadConfigSuccess, lastConfigTime, corruptionCount, etc.
-    """
-    url = f"{get_base_url()}/status/runtimeinfo"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_config() -> dict:
-    """Returns the currently loaded configuration file.
-    
-    Returns:
-        Object with 'yaml' field containing the raw YAML configuration string.
-    """
-    url = f"{get_base_url()}/status/config"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_flags() -> dict:
-    """Returns the flag values that Prometheus was configured with.
-    
-    Returns:
-        Object mapping flag names to their configured values.
-    """
-    url = f"{get_base_url()}/status/flags"
-    auth = get_auth()
-    headers = get_headers()
-
-    async with httpx.AsyncClient() as client:
-        kwargs = {"headers": headers, "timeout": 30.0}
-        if auth:
-            kwargs["auth"] = auth
-        response = await client.get(url, **kwargs)
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.get(url, params=params if params else None)
         response.raise_for_status()
         return response.json()
 
